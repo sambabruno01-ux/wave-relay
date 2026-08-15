@@ -4,26 +4,29 @@ import json
 import time
 import websockets
 
-# ROOMS: { room_id: { "password": pwd, "users": { username: { "ws": ws, "last_seen": t, "ping": 0 } } } }
 ROOMS = {}
 
-async def broadcast_room_state(room_id):
+async def broadcast_user_list(room_id):
     if room_id not in ROOMS:
         return
     
-    users_info = {
-        u: { "ping": data.get("ping", 0), "status": "online" }
+    users_data = {
+        u: {
+            "ping": data.get("ping", 0),
+            "status": "online"
+        }
         for u, data in ROOMS[room_id]["users"].items()
     }
-    msg = json.dumps({
+    
+    payload = json.dumps({
         "type": "USER_LIST",
         "room": room_id,
-        "users": users_info
+        "users": users_data
     })
     
     for u, data in list(ROOMS[room_id]["users"].items()):
         try:
-            await data["ws"].send(msg)
+            await data["ws"].send(payload)
         except Exception:
             pass
 
@@ -38,7 +41,7 @@ async def handler(websocket):
                     data = json.loads(message)
                     mtype = data.get("type")
 
-                    # Проверка статуса комнаты перед входом
+                    # Мгновенная проверка существования комнаты
                     if mtype == "CHECK_ROOM":
                         r_id = data.get("room", "").strip()
                         exists = r_id in ROOMS
@@ -48,7 +51,7 @@ async def handler(websocket):
                             "exists": exists
                         }))
 
-                    # Вход или создание комнаты с паролем
+                    # Авторизация / Создание комнаты
                     elif mtype == "JOIN":
                         r_id = data.get("room", "").strip()
                         name = data.get("user", "").strip()
@@ -72,19 +75,19 @@ async def handler(websocket):
                         user_name = name
                         ROOMS[user_room]["users"][user_name] = {
                             "ws": websocket,
-                            "last_seen": time.time(),
-                            "ping": 0
+                            "ping": 0,
+                            "last_seen": time.time()
                         }
 
-                        print(f"[+] {user_name} вошел в {user_room} (Всего: {len(ROOMS[user_room]['users'])})")
+                        print(f"[+] {user_name} зашел в {user_room} (Всего: {len(ROOMS[user_room]['users'])})")
                         await websocket.send(json.dumps({
                             "type": "JOIN_OK",
                             "room": user_room,
                             "user": user_name
                         }))
-                        await broadcast_room_state(user_room)
+                        await broadcast_user_list(user_room)
 
-                    # Пинг-Понг для измерения RTT и поддержания активности
+                    # Пинг-Понг
                     elif mtype == "PING":
                         ts = data.get("ts", time.time())
                         if user_room and user_room in ROOMS and user_name in ROOMS[user_room]["users"]:
@@ -95,17 +98,17 @@ async def handler(websocket):
                             "ts": ts
                         }))
 
-                    # Отчет клиента о его пинге (для рассылки всем участникам)
+                    # Отчет о пинге
                     elif mtype == "REPORT_PING":
-                        ping_val = data.get("ping", 0)
+                        ping_ms = data.get("ping", 0)
                         if user_room and user_room in ROOMS and user_name in ROOMS[user_room]["users"]:
-                            ROOMS[user_room]["users"][user_name]["ping"] = ping_val
-                            await broadcast_room_state(user_room)
+                            ROOMS[user_room]["users"][user_name]["ping"] = ping_ms
+                            await broadcast_user_list(user_room)
 
-                    # Сообщение в чат
+                    # Текстовый чат
                     elif mtype == "CHAT":
                         if user_room and user_room in ROOMS:
-                            chat_msg = json.dumps({
+                            chat_payload = json.dumps({
                                 "type": "CHAT",
                                 "room": user_room,
                                 "sender": user_name,
@@ -113,14 +116,14 @@ async def handler(websocket):
                             })
                             for peer_name, pdata in list(ROOMS[user_room]["users"].items()):
                                 try:
-                                    await pdata["ws"].send(chat_msg)
+                                    await pdata["ws"].send(chat_payload)
                                 except Exception:
                                     pass
 
                 except Exception as ex:
-                    print(f"[!] Ошибка разбора сообщения: {ex}")
+                    print(f"[!] Ошибка разбора: {ex}")
 
-            # 2. БИНАРНЫЕ АУДИО ПАКЕТЫ
+            # 2. АУДИО ПАКЕТЫ
             elif isinstance(message, bytes):
                 if user_room and user_room in ROOMS:
                     if user_name in ROOMS[user_room]["users"]:
@@ -134,44 +137,22 @@ async def handler(websocket):
                                 pass
 
     except Exception as e:
-        print(f"[-] Соединение закрыто для {user_name}: {e}")
+        print(f"[-] Соединение разорвано ({user_name}): {e}")
     finally:
         if user_room and user_room in ROOMS:
             if user_name in ROOMS[user_room]["users"]:
                 del ROOMS[user_room]["users"][user_name]
-                print(f"[-] {user_name} удален из {user_room}")
+                print(f"[-] {user_name} вышел из {user_room}")
             
+            # Если комната пустая — уничтожаем её
             if not ROOMS[user_room]["users"]:
                 del ROOMS[user_room]
-                print(f"[x] Пустая комната {user_room} автоматически уничтожена!")
+                print(f"[x] Комната {user_room} пуста и полностью удалена с сервера!")
             else:
-                await broadcast_room_state(user_room)
-
-async def cleanup_dead_connections():
-    """Фоновая автоочистка зависших клиентов и пустых комнат каждые 10 секунд"""
-    while True:
-        await asyncio.sleep(10)
-        now = time.time()
-        for r_id in list(ROOMS.keys()):
-            for u_name in list(ROOMS[r_id]["users"].keys()):
-                user_data = ROOMS[r_id]["users"][u_name]
-                if now - user_data.get("last_seen", now) > 40:
-                    print(f"[AutoKick] {u_name} не отвечает. Удаление из {r_id}")
-                    try:
-                        await user_data["ws"].close()
-                    except Exception:
-                        pass
-                    del ROOMS[r_id]["users"][u_name]
-
-            if not ROOMS[r_id]["users"]:
-                del ROOMS[r_id]
-                print(f"[AutoClean] Пустая комната {r_id} удалена!")
-            else:
-                await broadcast_room_state(r_id)
+                await broadcast_user_list(user_room)
 
 async def main():
     port = int(os.environ.get("PORT", 8765))
-    asyncio.create_task(cleanup_dead_connections())
     async with websockets.serve(
         handler,
         "0.0.0.0",
@@ -181,7 +162,7 @@ async def main():
         max_size=10 * 1024 * 1024,
         max_queue=128
     ):
-        print(f"[*] Wave Master Server V4 активен на порту {port}")
+        print(f"[*] Wave Pure Server V5 активен на порту {port}")
         await asyncio.Future()
 
 if __name__ == "__main__":
