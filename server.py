@@ -35,13 +35,13 @@ async def handler(websocket):
     user_name = None
     try:
         async for message in websocket:
-            # 1. ТЕКСТОВЫЕ КОМАНДЫ (JSON)
+            # 1. JSON ТЕКСТОВЫЕ КОМАНДЫ
             if isinstance(message, str):
                 try:
                     data = json.loads(message)
                     mtype = data.get("type")
 
-                    # Мгновенная проверка существования комнаты
+                    # Проверка статуса комнаты
                     if mtype == "CHECK_ROOM":
                         r_id = data.get("room", "").strip()
                         exists = r_id in ROOMS
@@ -51,7 +51,7 @@ async def handler(websocket):
                             "exists": exists
                         }))
 
-                    # Авторизация / Создание комнаты
+                    # Авторизация / Вход в комнату
                     elif mtype == "JOIN":
                         r_id = data.get("room", "").strip()
                         name = data.get("user", "").strip()
@@ -79,7 +79,7 @@ async def handler(websocket):
                             "last_seen": time.time()
                         }
 
-                        print(f"[+] {user_name} зашел в {user_room} (Всего: {len(ROOMS[user_room]['users'])})")
+                        print(f"[+] {user_name} вошел в комнату {user_room} (Участников: {len(ROOMS[user_room]['users'])})")
                         await websocket.send(json.dumps({
                             "type": "JOIN_OK",
                             "room": user_room,
@@ -87,7 +87,7 @@ async def handler(websocket):
                         }))
                         await broadcast_user_list(user_room)
 
-                    # Пинг-Понг
+                    # Измерение задержки RTT (Ping/Pong)
                     elif mtype == "PING":
                         ts = data.get("ts", time.time())
                         if user_room and user_room in ROOMS and user_name in ROOMS[user_room]["users"]:
@@ -98,7 +98,7 @@ async def handler(websocket):
                             "ts": ts
                         }))
 
-                    # Отчет о пинге
+                    # Обновление пинга клиента для всех
                     elif mtype == "REPORT_PING":
                         ping_ms = data.get("ping", 0)
                         if user_room and user_room in ROOMS and user_name in ROOMS[user_room]["users"]:
@@ -121,9 +121,9 @@ async def handler(websocket):
                                     pass
 
                 except Exception as ex:
-                    print(f"[!] Ошибка разбора: {ex}")
+                    print(f"[!] Ошибка обработки JSON: {ex}")
 
-            # 2. АУДИО ПАКЕТЫ
+            # 2. АУДИОПАКЕТЫ (Бинарные байты)
             elif isinstance(message, bytes):
                 if user_room and user_room in ROOMS:
                     if user_name in ROOMS[user_room]["users"]:
@@ -137,14 +137,14 @@ async def handler(websocket):
                                 pass
 
     except Exception as e:
-        print(f"[-] Соединение разорвано ({user_name}): {e}")
+        print(f"[-] Отключение {user_name}: {e}")
     finally:
+        # Моментальная очистка вышедшего пользователя и пустой комнаты
         if user_room and user_room in ROOMS:
             if user_name in ROOMS[user_room]["users"]:
                 del ROOMS[user_room]["users"][user_name]
-                print(f"[-] {user_name} вышел из {user_room}")
+                print(f"[-] {user_name} покинул комнату {user_room}")
             
-            # Если комната пустая — уничтожаем её
             if not ROOMS[user_room]["users"]:
                 del ROOMS[user_room]
                 print(f"[x] Комната {user_room} пуста и полностью удалена с сервера!")
@@ -162,7 +162,7 @@ async def main():
         max_size=10 * 1024 * 1024,
         max_queue=128
     ):
-        print(f"[*] Wave Pure Server V5 активен на порту {port}")
+        print(f"[*] Wave Master Server V6 запущен на порту {port}")
         await asyncio.Future()
 
 if __name__ == "__main__":
