@@ -16,7 +16,8 @@ async def broadcast_user_list(room_id):
             "ping": data.get("ping", 0),
             "status": "online",
             "mic_muted": data.get("mic_muted", False),
-            "deafened": data.get("deafened", False)
+            "deafened": data.get("deafened", False),
+            "self_listen": data.get("self_listen", False)
         }
         for u, data in ROOMS[room_id]["users"].items()
     }
@@ -66,6 +67,7 @@ async def handler(websocket):
                         pwd = data.get("password", "").strip()
                         mic_muted = data.get("mic_muted", False)
                         deafened = data.get("deafened", False)
+                        self_listen = data.get("self_listen", False)
 
                         if not r_id or not name:
                             continue
@@ -96,6 +98,7 @@ async def handler(websocket):
                             "ping": 0,
                             "mic_muted": mic_muted,
                             "deafened": deafened,
+                            "self_listen": self_listen,
                             "last_seen": time.time()
                         }
 
@@ -113,6 +116,8 @@ async def handler(websocket):
                                 ROOMS[user_room]["users"][user_name]["mic_muted"] = data["mic_muted"]
                             if "deafened" in data:
                                 ROOMS[user_room]["users"][user_name]["deafened"] = data["deafened"]
+                            if "self_listen" in data:
+                                ROOMS[user_room]["users"][user_name]["self_listen"] = data["self_listen"]
                             await broadcast_user_list(user_room)
 
                     elif mtype == "PING":
@@ -153,8 +158,9 @@ async def handler(websocket):
                     if user_name in ROOMS[user_room]["users"]:
                         ROOMS[user_room]["users"][user_name]["last_seen"] = time.time()
                     
+                    # Рассылка пакета: если у автора включен self_listen, он тоже получает пакет обратно от сервера
                     for peer_name, pdata in list(ROOMS[user_room]["users"].items()):
-                        if peer_name != user_name:
+                        if peer_name != user_name or pdata.get("self_listen", False):
                             try:
                                 await pdata["ws"].send(message)
                             except Exception:
