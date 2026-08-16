@@ -14,7 +14,9 @@ async def broadcast_user_list(room_id):
     users_data = {
         u: {
             "ping": data.get("ping", 0),
-            "status": "online"
+            "status": "online",
+            "mic_muted": data.get("mic_muted", False),
+            "deafened": data.get("deafened", False)
         }
         for u, data in ROOMS[room_id]["users"].items()
     }
@@ -62,12 +64,13 @@ async def handler(websocket):
                         r_id = data.get("room", "").strip()
                         name = data.get("user", "").strip()
                         pwd = data.get("password", "").strip()
+                        mic_muted = data.get("mic_muted", False)
+                        deafened = data.get("deafened", False)
 
                         if not r_id or not name:
                             continue
 
                         if r_id in ROOMS:
-                            # Отменяем удаление, если кто-то заходит в существующую комнату
                             if r_id in CLEANUP_TASKS:
                                 CLEANUP_TASKS[r_id].cancel()
                                 del CLEANUP_TASKS[r_id]
@@ -91,6 +94,8 @@ async def handler(websocket):
                         ROOMS[user_room]["users"][user_name] = {
                             "ws": websocket,
                             "ping": 0,
+                            "mic_muted": mic_muted,
+                            "deafened": deafened,
                             "last_seen": time.time()
                         }
 
@@ -101,6 +106,14 @@ async def handler(websocket):
                             "user": user_name
                         }))
                         await broadcast_user_list(user_room)
+
+                    elif mtype == "UPDATE_STATE":
+                        if user_room and user_room in ROOMS and user_name in ROOMS[user_room]["users"]:
+                            if "mic_muted" in data:
+                                ROOMS[user_room]["users"][user_name]["mic_muted"] = data["mic_muted"]
+                            if "deafened" in data:
+                                ROOMS[user_room]["users"][user_name]["deafened"] = data["deafened"]
+                            await broadcast_user_list(user_room)
 
                     elif mtype == "PING":
                         ts = data.get("ts", time.time())
@@ -152,7 +165,6 @@ async def handler(websocket):
     finally:
         if user_room and user_room in ROOMS:
             if user_name in ROOMS[user_room]["users"]:
-                # Удаляем только если это сокет текущей сессии
                 if ROOMS[user_room]["users"][user_name].get("ws") == websocket:
                     del ROOMS[user_room]["users"][user_name]
                     print(f"[-] {user_name} отключился от {user_room}")
