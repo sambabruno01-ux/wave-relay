@@ -6,6 +6,8 @@ import websockets
 
 ROOMS = {}
 CLEANUP_TASKS = {}
+ROOM_PERSIST_DAYS = 7
+INACTIVITY_TIMEOUT = 45
 
 async def broadcast_user_list(room_id):
     if room_id not in ROOMS:
@@ -17,7 +19,8 @@ async def broadcast_user_list(room_id):
             "status": "online",
             "mic_muted": data.get("mic_muted", False),
             "deafened": data.get("deafened", False),
-            "self_listen": data.get("self_listen", False)
+            "self_listen": data.get("self_listen", False),
+            "is_soundpad": data.get("is_soundpad", False)
         }
         for u, data in ROOMS[room_id]["users"].items()
     }
@@ -25,7 +28,9 @@ async def broadcast_user_list(room_id):
     payload = json.dumps({
         "type": "USER_LIST",
         "room": room_id,
-        "users": users_data
+        "users": users_data,
+        "reserved": ROOMS[room_id].get("reserved", False),
+        "expire_at": ROOMS[room_id].get("expire_at", 0)
     })
     
     for u, data in list(ROOMS[room_id]["users"].items()):
@@ -34,11 +39,17 @@ async def broadcast_user_list(room_id):
         except Exception:
             pass
 
-async def schedule_room_cleanup(room_id, delay=45):
+async def schedule_room_cleanup(room_id, delay=INACTIVITY_TIMEOUT):
     await asyncio.sleep(delay)
-    if room_id in ROOMS and len(ROOMS[room_id]["users"]) == 0:
-        del ROOMS[room_id]
-        print(f"[x] Комната {room_id} удалена по таймауту неактивности.")
+    if room_id in ROOMS:
+        if ROOMS[room_id].get("reserved", False):
+            if time.time() >= ROOMS[room_id].get("expire_at", 0):
+                del ROOMS[room_id]
+                print(f"[x] Reserved room {room_id} expired after 7 days of inactivity.")
+        elif len(ROOMS[room_id]["users"]) == 0:
+            del ROOMS[room_id]
+            print(f"[x] Temporary room {room_id} deleted on inactivity.")
+            
     if room_id in CLEANUP_TASKS:
         del CLEANUP_TASKS[room_id]
 
@@ -55,10 +66,20 @@ async def handler(websocket):
                     if mtype == "CHECK_ROOM":
                         r_id = data.get("room", "").strip()
                         exists = r_id in ROOMS
+                        room_users = {}
+                        is_reserved = False
+                        if exists:
+                            is_reserved = ROOMS[r_id].get("reserved", False)
+                            room_users = {
+                                u: {"ping": d.get("ping", 0)}
+                                for u, d in ROOMS[r_id]["users"].items()
+                            }
                         await websocket.send(json.dumps({
                             "type": "ROOM_STATUS",
                             "room": r_id,
-                            "exists": exists
+                            "exists": exists,
+                            "reserved": is_reserved,
+                            "users": room_users
                         }))
 
                     elif mtype == "JOIN":
@@ -68,6 +89,7 @@ async def handler(websocket):
                         mic_muted = data.get("mic_muted", False)
                         deafened = data.get("deafened", False)
                         self_listen = data.get("self_listen", False)
+                        wants_reserve = data.get("reserve", False)
 
                         if not r_id or not name:
                             continue
@@ -83,12 +105,19 @@ async def handler(websocket):
                                     "msg": "Неверный пароль от комнаты!"
                                 }))
                                 continue
+                            
+                            if wants_reserve or ROOMS[r_id].get("reserved", False):
+                                ROOMS[r_id]["reserved"] = True
+                                ROOMS[r_id]["expire_at"] = time.time() + (ROOM_PERSIST_DAYS * 86400)
                         else:
+                            expire_time = time.time() + (ROOM_PERSIST_DAYS * 86400) if wants_reserve else 0
                             ROOMS[r_id] = {
                                 "password": pwd,
+                                "reserved": wants_reserve,
+                                "expire_at": expire_time,
                                 "users": {}
                             }
-                            print(f"[*] Создана комната: {r_id}")
+                            print(f"[*] Создана комната: {r_id} (Резерв: {wants_reserve})")
 
                         user_room = r_id
                         user_name = name
@@ -99,6 +128,7 @@ async def handler(websocket):
                             "mic_muted": mic_muted,
                             "deafened": deafened,
                             "self_listen": self_listen,
+                            "is_soundpad": False,
                             "last_seen": time.time()
                         }
 
@@ -106,9 +136,18 @@ async def handler(websocket):
                         await websocket.send(json.dumps({
                             "type": "JOIN_OK",
                             "room": user_room,
-                            "user": user_name
+                            "user": user_name,
+                            "reserved": ROOMS[user_room]["reserved"]
                         }))
                         await broadcast_user_list(user_room)
+
+                    elif mtype == "TOGGLE_RESERVE":
+                        if user_room and user_room in ROOMS:
+                            state = data.get("reserve", False)
+                            ROOMS[user_room]["reserved"] = state
+                            if state:
+                                ROOMS[user_room]["expire_at"] = time.time() + (ROOM_PERSIST_DAYS * 86400)
+                            await broadcast_user_list(user_room)
 
                     elif mtype == "UPDATE_STATE":
                         if user_room and user_room in ROOMS and user_name in ROOMS[user_room]["users"]:
@@ -118,6 +157,8 @@ async def handler(websocket):
                                 ROOMS[user_room]["users"][user_name]["deafened"] = data["deafened"]
                             if "self_listen" in data:
                                 ROOMS[user_room]["users"][user_name]["self_listen"] = data["self_listen"]
+                            if "is_soundpad" in data:
+                                ROOMS[user_room]["users"][user_name]["is_soundpad"] = data["is_soundpad"]
                             await broadcast_user_list(user_room)
 
                     elif mtype == "PING":
@@ -158,7 +199,6 @@ async def handler(websocket):
                     if user_name in ROOMS[user_room]["users"]:
                         ROOMS[user_room]["users"][user_name]["last_seen"] = time.time()
                     
-                    # Рассылка пакета: если у автора включен self_listen, он тоже получает пакет обратно от сервера
                     for peer_name, pdata in list(ROOMS[user_room]["users"].items()):
                         if peer_name != user_name or pdata.get("self_listen", False):
                             try:
@@ -187,8 +227,8 @@ async def main():
         handler,
         "0.0.0.0",
         port,
-        ping_interval=20,
-        ping_timeout=20,
+        ping_interval=10,
+        ping_timeout=10,
         max_size=10 * 1024 * 1024,
         max_queue=128
     ):
